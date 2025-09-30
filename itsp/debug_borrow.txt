@@ -1,0 +1,87 @@
+Book: Array
+(
+    [stock] => 200
+)
+
+Borrowed result num_rows: 1
+Already borrowed this book\nException: You have already borrowed this book
+Book: Array
+(
+    [stock] => 10
+)
+
+Borrowed result num_rows: 1
+Already borrowed this book\nException: You have already borrowed this book
+Book: Array
+(
+    [stock] => 10
+)
+
+Borrowed result num_rows: 1
+Already borrowed this book\nException: You have already borrowed this book
+Book: Array
+(
+    [stock] => 200
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 199
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 198
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 10
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 10
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 10
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 197
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 9
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 100
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 200
+)
+
+Borrowed result num_rows: 0
+Book: Array
+(
+    [stock] => 100
+)
+
+Borrowed result num_rows: 0

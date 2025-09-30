@@ -1,0 +1,10 @@
+Array
+(
+    [admin_id] => 1
+    [admin_username] => admin
+    [admin_name] => System Administrator
+    [is_admin] => 1
+    [registration_success] => ✅ Registration complete. You can now log in.
+    [student_id] => 123
+    [user_type] => student
+)

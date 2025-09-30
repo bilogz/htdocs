@@ -1,0 +1,2216 @@
+<?php
+session_name('admin_session');
+session_start();
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+require_once 'config.php';
+
+// Place this at the very beginning of the file, right after session_start()
+// Strict session validation
+function validateAdminSession() {
+    if (!isset($_SESSION['is_admin']) || 
+        !$_SESSION['is_admin'] || 
+        !isset($_SESSION['admin_id']) || 
+        !isset($_SESSION['user_type']) || 
+        $_SESSION['user_type'] !== 'admin') {
+        
+        // Clear any existing session
+        session_unset();
+        session_destroy();
+        
+        // Start a new session for the error message
+        session_start();
+        $_SESSION['error'] = 'Please log in as an administrator to access this page.';
+        
+        // Redirect to admin login
+        header('Location: admin_login.php?error=unauthorized');
+        exit();
+    }
+}
+
+// Call the validation function
+validateAdminSession();
+
+// Regenerate session ID periodically to prevent session fixation
+if (!isset($_SESSION['last_session_regeneration']) || (time() - $_SESSION['last_session_regeneration']) > 1800) {
+    session_regenerate_id(true);
+    $_SESSION['last_session_regeneration'] = time();
+}
+
+// Check if it's an AJAX request
+$is_ajax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+
+// Only show debug info for non-AJAX requests
+if (!$is_ajax) {
+    // Debug information
+    echo "<!-- Debug: Script started -->\n";
+    echo "<!-- Session: " . print_r($_SESSION, true) . " -->\n";
+}
+
+// Debug database connection
+if ($conn->connect_error) {
+    if ($is_ajax) {
+        die(json_encode(['success' => false, 'message' => 'Database connection failed']));
+    } else {
+        die("Connection failed: " . $conn->connect_error);
+    }
+}
+
+if (!$is_ajax) {
+    echo "<!-- Debug: Database connected successfully -->\n";
+}
+
+// Handle form submissions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['action'])) {
+        switch ($_POST['action']) {
+            case 'add_book':
+                $cover_image = '';
+                if (isset($_FILES['cover_image']) && $_FILES['cover_image']['error'] === 0) {
+                    $cover_dir = 'assets/images/';
+                    $cover_image = time() . '_' . basename($_FILES['cover_image']['name']);
+                    move_uploaded_file($_FILES['cover_image']['tmp_name'], $cover_dir . $cover_image);
+                }
+                
+                $stmt = $conn->prepare("INSERT INTO books (title, author, category, description, cover_image, available_stock, status) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                if (!$stmt) {
+                    die("Error preparing statement: " . $conn->error);
+                }
+                $stmt->bind_param("ssssssi", 
+                    $_POST['title'],
+                    $_POST['author'],
+                    $_POST['category'],
+                    $_POST['description'],
+                    $cover_image,
+                    $_POST['available_stock'],
+                    $_POST['status']
+                );
+                $stmt->execute();
+                $stmt->close();
+                break;
+
+            case 'edit_book':
+                $cover_image = $_POST['current_cover'];
+                if (isset($_FILES['cover_image']) && $_FILES['cover_image']['error'] === 0) {
+                    $cover_dir = 'assets/images/';
+                    $cover_image = time() . '_' . basename($_FILES['cover_image']['name']);
+                    move_uploaded_file($_FILES['cover_image']['tmp_name'], $cover_dir . $cover_image);
+                    // Delete old cover if exists
+                    if ($_POST['current_cover'] && file_exists($cover_dir . $_POST['current_cover'])) {
+                        unlink($cover_dir . $_POST['current_cover']);
+                    }
+                }
+                
+                $stmt = $conn->prepare("UPDATE books SET title = ?, author = ?, category = ?, description = ?, cover_image = ?, available_stock = ?, status = ? WHERE book_id = ?");
+                if (!$stmt) {
+                    echo json_encode(['success' => false, 'message' => 'Error preparing statement: ' . $conn->error]);
+                    exit();
+                }
+                if (!$stmt->bind_param("sssssisi",
+                    $_POST['title'],
+                    $_POST['author'],
+                    $_POST['category'],
+                    $_POST['description'],
+                    $cover_image,
+                    $_POST['available_stock'],
+                    $_POST['status'],
+                    $_POST['book_id']
+                )) {
+                    echo json_encode(['success' => false, 'message' => 'Error binding parameters: ' . $stmt->error]);
+                    exit();
+                }
+                if (!$stmt->execute()) {
+                    echo json_encode(['success' => false, 'message' => 'Error executing statement: ' . $stmt->error]);
+                    exit();
+                }
+                echo json_encode(['success' => true, 'message' => 'Book updated successfully']);
+                $stmt->close();
+                exit();
+                break;
+
+            case 'delete_book':
+                // Get cover image before deleting
+                $stmt = $conn->prepare("SELECT cover_image FROM books WHERE book_id = ?");
+                $stmt->bind_param("i", $_POST['book_id']);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                $book = $result->fetch_assoc();
+                
+                // Delete from database
+                $delete_stmt = $conn->prepare("DELETE FROM books WHERE book_id = ?");
+                $delete_stmt->bind_param("i", $_POST['book_id']);
+                $delete_stmt->execute();
+                $delete_stmt->close();
+                
+                // Delete cover image
+                if ($book && $book['cover_image']) {
+                    @unlink('assets/images/' . $book['cover_image']);
+                }
+                break;
+
+            case 'add_ebook':
+                $cover_image = '';
+                $file_path = '';
+                
+                if (isset($_FILES['cover_image']) && $_FILES['cover_image']['error'] === 0) {
+                    $cover_dir = 'assets/images/';
+                    $cover_image = time() . '_' . basename($_FILES['cover_image']['name']);
+                    move_uploaded_file($_FILES['cover_image']['tmp_name'], $cover_dir . $cover_image);
+                }
+                
+                if (isset($_FILES['ebook_file']) && $_FILES['ebook_file']['error'] === 0) {
+                    $ebook_dir = 'ebooks/';
+                    $file_path = time() . '_' . basename($_FILES['ebook_file']['name']);
+                    move_uploaded_file($_FILES['ebook_file']['tmp_name'], $ebook_dir . $file_path);
+                }
+                
+                $stmt = $conn->prepare("INSERT INTO ebooks (title, author, category, description, cover_image, file_path, price, status, download_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->bind_param("ssssssdss", 
+                    $_POST['title'],
+                    $_POST['author'],
+                    $_POST['category'],
+                    $_POST['description'],
+                    $cover_image,
+                    $file_path,
+                    $_POST['price'],
+                    $_POST['status'],
+                    $_POST['download_status']
+                );
+                $stmt->execute();
+                $stmt->close();
+                break;
+
+            case 'edit_ebook':
+                if (!isset($_POST['ebook_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Ebook ID is required']);
+                    exit();
+                }
+
+                $ebook_id = $_POST['ebook_id'];
+                $title = $_POST['title'];
+                $author = $_POST['author'];
+                $category = $_POST['category'];
+                $price = $_POST['price'];
+                $status = $_POST['status'];
+                $download_status = $_POST['download_status'];
+                $description = $_POST['description'];
+                $current_cover = $_POST['current_cover'];
+                $current_file = $_POST['current_file'];
+
+                // Start building the update query
+                $query = "UPDATE ebooks SET 
+                          title = ?, 
+                          author = ?, 
+                          category = ?, 
+                          price = ?, 
+                          status = ?, 
+                          download_status = ?, 
+                          description = ?";
+                $types = "sssdsss";
+                $params = [$title, $author, $category, $price, $status, $download_status, $description];
+
+                // Handle cover image upload
+                if (isset($_FILES['cover_image']) && $_FILES['cover_image']['error'] === UPLOAD_ERR_OK) {
+                    $target_dir = "assets/images/";
+                    $file_extension = strtolower(pathinfo($_FILES["cover_image"]["name"], PATHINFO_EXTENSION));
+                    $new_filename = "ebook_cover_" . $ebook_id . "." . $file_extension;
+                    $target_file = $target_dir . $new_filename;
+
+                    // Check if image file is a actual image
+                    $check = getimagesize($_FILES["cover_image"]["tmp_name"]);
+                    if ($check !== false) {
+                        // Allow certain file formats
+                        if ($file_extension == "jpg" || $file_extension == "png" || $file_extension == "jpeg") {
+                            if (move_uploaded_file($_FILES["cover_image"]["tmp_name"], $target_file)) {
+                                $query .= ", cover_image = ?";
+                                $types .= "s";
+                                $params[] = $new_filename;
+                            }
+                        }
+                    }
+                }
+
+                // Handle ebook file upload
+                if (isset($_FILES['ebook_file']) && $_FILES['ebook_file']['error'] === UPLOAD_ERR_OK) {
+                    $target_dir = "assets/ebooks/";
+                    $file_extension = strtolower(pathinfo($_FILES["ebook_file"]["name"], PATHINFO_EXTENSION));
+                    $new_filename = "ebook_" . $ebook_id . "." . $file_extension;
+                    $target_file = $target_dir . $new_filename;
+
+                    if (move_uploaded_file($_FILES["ebook_file"]["tmp_name"], $target_file)) {
+                        $query .= ", file_path = ?";
+                        $types .= "s";
+                        $params[] = $new_filename;
+                    }
+                }
+
+                $query .= " WHERE id = ?";
+                $types .= "i";
+                $params[] = $ebook_id;
+
+                $stmt = $conn->prepare($query);
+                if (!$stmt) {
+                    echo json_encode(['success' => false, 'message' => 'Error preparing statement: ' . $conn->error]);
+                    exit();
+                }
+                if (!$stmt->bind_param($types, ...$params)) {
+                    echo json_encode(['success' => false, 'message' => 'Error binding parameters: ' . $stmt->error]);
+                    exit();
+                }
+                if (!$stmt->execute()) {
+                    echo json_encode(['success' => false, 'message' => 'Error executing statement: ' . $stmt->error]);
+                    exit();
+                }
+                echo json_encode(['success' => true, 'message' => 'Ebook updated successfully']);
+                $stmt->close();
+                exit();
+                break;
+
+            case 'delete_ebook':
+                // Get file paths before deleting
+                $stmt = $conn->prepare("SELECT cover_image, file_path FROM ebooks WHERE id = ?");
+                $stmt->bind_param("i", $_POST['ebook_id']);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                $ebook = $result->fetch_assoc();
+                
+                // Delete from database
+                $delete_stmt = $conn->prepare("DELETE FROM ebooks WHERE id = ?");
+                $delete_stmt->bind_param("i", $_POST['ebook_id']);
+                $delete_stmt->execute();
+                $delete_stmt->close();
+                
+                // Delete files
+                if ($ebook) {
+                    @unlink('assets/images/' . $ebook['cover_image']);
+                    @unlink('ebooks/' . $ebook['file_path']);
+                }
+                break;
+
+            case 'approve_borrow':
+                $schedule_id = $_POST['schedule_id'];
+                
+                // Start transaction
+                $conn->begin_transaction();
+                
+                try {
+                    // Get schedule information
+                    $schedule_query = "SELECT bs.*, b.title, b.available_stock 
+                                      FROM book_schedules bs 
+                                      JOIN books b ON bs.book_id = b.book_id 
+                                      WHERE bs.schedule_id = ?";
+                    $schedule_stmt = $conn->prepare($schedule_query);
+                    if (!$schedule_stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $schedule_stmt->bind_param("i", $schedule_id);
+                    $schedule_stmt->execute();
+                    $schedule_result = $schedule_stmt->get_result();
+                    $schedule = $schedule_result->fetch_assoc();
+                    
+                    // Check if book is available
+                    if ($schedule['available_stock'] <= 0) {
+                        throw new Exception("Book is not available for borrowing");
+                    }
+                    
+                    // Update schedule status
+                    $update_schedule = $conn->prepare("UPDATE book_schedules SET status = 'confirmed' WHERE schedule_id = ?");
+                    if (!$update_schedule) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $update_schedule->bind_param("i", $schedule_id);
+                    $update_schedule->execute();
+                    
+                    // Create record in borrowed_books
+                    $insert_borrow = $conn->prepare("INSERT INTO borrowed_books (student_id, book_id, borrow_date, due_date, purpose) VALUES (?, ?, CURRENT_TIMESTAMP, DATE_ADD(CURRENT_DATE, INTERVAL 14 DAY), ?)");
+                    if (!$insert_borrow) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $insert_borrow->bind_param("iis", $schedule['student_id'], $schedule['book_id'], $schedule['purpose']);
+                    $insert_borrow->execute();
+                    
+                    // Update book stock
+                    $update_stock = $conn->prepare("UPDATE books SET available_stock = available_stock - 1 WHERE book_id = ?");
+                    if (!$update_stock) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $update_stock->bind_param("i", $schedule['book_id']);
+                    $update_stock->execute();
+                    
+                    // Create notification
+                    $due_date = date('Y-m-d', strtotime('+14 days'));
+                    $message = "Your borrow request for '{$schedule['title']}' has been approved. Due date: {$due_date}";
+                    $notif_stmt = $conn->prepare("INSERT INTO notifications (student_id, message, type) VALUES (?, ?, 'borrow_approved')");
+                    if (!$notif_stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $notif_stmt->bind_param("is", $schedule['student_id'], $message);
+                    $notif_stmt->execute();
+                    
+                    // Commit transaction
+                    $conn->commit();
+                    
+                    if ($is_ajax) {
+                        echo json_encode(['success' => true, 'message' => 'Borrow request approved successfully']);
+                    }
+                    
+                } catch (Exception $e) {
+                    // Rollback transaction on error
+                    $conn->rollback();
+                    
+                    if ($is_ajax) {
+                        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+                    } else {
+                        die("Error: " . $e->getMessage());
+                    }
+                }
+                break;
+
+            case 'reject_borrow':
+                $schedule_id = $_POST['schedule_id'];
+                
+                // Start transaction
+                $conn->begin_transaction();
+                
+                try {
+                    // Get schedule information
+                    $schedule_query = "SELECT bs.*, b.title 
+                                      FROM book_schedules bs 
+                                      JOIN books b ON bs.book_id = b.book_id 
+                                      WHERE bs.schedule_id = ?";
+                    $schedule_stmt = $conn->prepare($schedule_query);
+                    if (!$schedule_stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $schedule_stmt->bind_param("i", $schedule_id);
+                    $schedule_stmt->execute();
+                    $schedule_result = $schedule_stmt->get_result();
+                    $schedule = $schedule_result->fetch_assoc();
+                    
+                    // Update schedule status
+                    $update_schedule = $conn->prepare("UPDATE book_schedules SET status = 'cancelled' WHERE schedule_id = ?");
+                    if (!$update_schedule) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $update_schedule->bind_param("i", $schedule_id);
+                    $update_schedule->execute();
+                    
+                    // Create notification
+                    $message = "Your borrow request for '{$schedule['title']}' has been rejected.";
+                    $notif_stmt = $conn->prepare("INSERT INTO notifications (student_id, message, type) VALUES (?, ?, 'borrow_rejected')");
+                    if (!$notif_stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $notif_stmt->bind_param("is", $schedule['student_id'], $message);
+                    $notif_stmt->execute();
+                    
+                    // Commit transaction
+                    $conn->commit();
+                    
+                    if ($is_ajax) {
+                        echo json_encode(['success' => true, 'message' => 'Borrow request rejected successfully']);
+                    }
+                    
+                } catch (Exception $e) {
+                    // Rollback transaction on error
+                    $conn->rollback();
+                    
+                    if ($is_ajax) {
+                        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+                    } else {
+                        die("Error: " . $e->getMessage());
+                    }
+                }
+                break;
+
+            case 'approve_return':
+                $record_id = $_POST['record_id'];
+                $stmt = $conn->prepare("UPDATE borrowed_books SET admin_confirmed_return = 1, return_date = CURRENT_TIMESTAMP WHERE record_id = ?");
+                if (!$stmt) {
+                    die("Prepare failed: " . $conn->error);
+                }
+                $stmt->bind_param("i", $record_id);
+                $stmt->execute();
+                
+                // Get student and book information for notification
+                $info_query = "SELECT bb.student_id, b.title 
+                              FROM borrowed_books bb 
+                              JOIN books b ON bb.book_id = b.book_id 
+                              WHERE bb.record_id = ?";
+                $info_stmt = $conn->prepare($info_query);
+                if (!$info_stmt) {
+                    die("Prepare failed: " . $conn->error);
+                }
+                $info_stmt->bind_param("i", $record_id);
+                $info_stmt->execute();
+                $info_result = $info_stmt->get_result();
+                $info = $info_result->fetch_assoc();
+                
+                // Create notification
+                if ($info) {
+                    $message = "Your return of '{$info['title']}' has been confirmed.";
+                    $notif_stmt = $conn->prepare("INSERT INTO notifications (student_id, message, type) VALUES (?, ?, 'return_approved')");
+                    if (!$notif_stmt) {
+                        die("Prepare failed: " . $conn->error);
+                    }
+                    $notif_stmt->bind_param("is", $info['student_id'], $message);
+                    $notif_stmt->execute();
+                }
+                
+                // Update book stock
+                $update_stock = $conn->prepare("UPDATE books b 
+                    JOIN borrowed_books bb ON b.book_id = bb.book_id 
+                    SET b.available_stock = b.available_stock + 1 
+                    WHERE bb.record_id = ?");
+                if (!$update_stock) {
+                    die("Prepare failed: " . $conn->error);
+                }
+                $update_stock->bind_param("i", $record_id);
+                $update_stock->execute();
+                
+                $stmt->close();
+                $info_stmt->close();
+                $update_stock->close();
+                break;
+
+            case 'reject_return':
+                $record_id = $_POST['record_id'];
+                $stmt = $conn->prepare("UPDATE borrowed_books SET return_date = NULL WHERE record_id = ?");
+                if (!$stmt) {
+                    die("Prepare failed: " . $conn->error);
+                }
+                $stmt->bind_param("i", $record_id);
+                $stmt->execute();
+                $stmt->close();
+                break;
+        }
+    }
+}
+
+// Fetch books and ebooks
+$books_query = "SELECT * FROM books ORDER BY book_id DESC";
+$books_result = $conn->query($books_query);
+
+$ebooks_query = "SELECT * FROM ebooks ORDER BY id DESC";
+$ebooks_result = $conn->query($ebooks_query);
+
+// Fetch pending borrow requests from book_schedules (pending approval)
+$pending_schedules_query = "SELECT bs.*, b.title as book_title, b.cover_image, u.full_name as student_name, u.email as student_email
+    FROM book_schedules bs
+    JOIN books b ON bs.book_id = b.book_id
+    JOIN users u ON bs.student_id = u.student_id
+    WHERE bs.status = 'pending'
+    ORDER BY bs.schedule_date DESC";
+$pending_schedules_result = $conn->query($pending_schedules_query);
+
+// Debug information
+if (!$pending_schedules_result) {
+    error_log("SQL Error in pending schedules query: " . $conn->error);
+}
+
+// Get count of pending requests
+$pending_count = $pending_schedules_result ? $pending_schedules_result->num_rows : 0;
+
+// Add AJAX endpoint for real-time updates
+if ($is_ajax) {
+    $response = [
+        'pending_requests' => [],
+        'pending_count' => $pending_count
+    ];
+    
+    if ($pending_schedules_result) {
+        while ($request = $pending_schedules_result->fetch_assoc()) {
+            $response['pending_requests'][] = [
+                'schedule_id' => $request['schedule_id'],
+                'student_name' => $request['student_name'],
+                'student_email' => $request['student_email'],
+                'book_title' => $request['book_title'],
+                'schedule_date' => $request['scheduled_date'],
+                'purpose' => $request['purpose'],
+                'status' => $request['status']
+            ];
+        }
+    }
+    
+    header('Content-Type: application/json');
+    echo json_encode($response);
+    exit();
+}
+
+// Fetch return requests
+$return_query = "SELECT bb.*, b.title as book_title, b.cover_image, u.full_name as student_name, u.email as student_email, DATEDIFF(bb.return_date, bb.due_date) as days_overdue, GREATEST(DATEDIFF(bb.return_date, bb.due_date),0) * 1 as overdue_fee FROM borrowed_books bb JOIN books b ON bb.book_id = b.book_id JOIN users u ON bb.student_id = u.student_id WHERE bb.return_date IS NOT NULL AND bb.admin_confirmed_return = 0 ORDER BY bb.return_date DESC";
+$return_result = $conn->query($return_query);
+if (!$return_result || $return_result->num_rows == 0) {
+    echo '<!-- DEBUG: No pending return requests found. SQL: ' . $return_query . ' -->';
+}
+
+// Get count of pending return requests
+$pending_returns = $return_result->num_rows;
+
+// Fetch students with their borrowed books
+$students_query = "SELECT 
+    u.*,
+    COUNT(DISTINCT bs.schedule_id) as total_borrows,
+    COUNT(DISTINCT CASE WHEN bs.status = 'confirmed' THEN bs.schedule_id END) as active_borrows,
+    COUNT(DISTINCT CASE WHEN bs.status = 'cancelled' THEN bs.schedule_id END) as cancelled_borrows
+    FROM users u 
+    LEFT JOIN book_schedules bs ON u.student_id = bs.student_id 
+    WHERE u.user_type = 'student' 
+    GROUP BY u.student_id, u.full_name, u.email";
+$students_result = $conn->query($students_query);
+
+// Debug information
+echo "<!-- Debug: Students query result rows: " . ($students_result ? $students_result->num_rows : 'Query failed') . " -->\n";
+if (!$students_result) {
+    echo "<!-- Debug: SQL Error: " . $conn->error . " -->\n";
+}
+
+// Calculate overdue fees
+$overdue_query = "SELECT bb.*, b.title as book_title, u.full_name as student_name, u.email as student_email,
+    DATEDIFF(CURRENT_DATE, bb.due_date) as days_overdue,
+    DATEDIFF(CURRENT_DATE, bb.due_date) * 1 as overdue_fee
+    FROM borrowed_books bb 
+    JOIN books b ON bb.book_id = b.book_id 
+    JOIN users u ON bb.student_id = u.student_id 
+    WHERE bb.return_date IS NULL 
+    AND bb.due_date < CURRENT_DATE
+    AND bb.admin_confirmed_return = 0
+    ORDER BY bb.due_date ASC";
+$overdue_result = $conn->query($overdue_query);
+$overdue_count = $overdue_result->num_rows;
+
+// Add this new function to check for due dates and send notifications
+function checkDueDates($conn) {
+    // Check for books due in 2 days
+    $due_soon_query = "SELECT bb.student_id, b.title, bb.due_date 
+                      FROM borrowed_books bb 
+                      JOIN books b ON bb.book_id = b.book_id 
+                      WHERE bb.return_date IS NULL 
+                      AND bb.due_date BETWEEN CURRENT_DATE AND DATE_ADD(CURRENT_DATE, INTERVAL 2 DAY)";
+    $due_soon_result = $conn->query($due_soon_query);
+    
+    while ($book = $due_soon_result->fetch_assoc()) {
+        $message = "Reminder: '{$book['title']}' is due on " . date('Y-m-d', strtotime($book['due_date']));
+        $notif_stmt = $conn->prepare("INSERT INTO notifications (student_id, message, type) VALUES (?, ?, 'due_soon')");
+        if (!$notif_stmt) {
+            die("Prepare failed: " . $conn->error);
+        }
+        $notif_stmt->bind_param("is", $book['student_id'], $message);
+        $notif_stmt->execute();
+    }
+}
+
+// Call the function to check due dates
+checkDueDates($conn);
+
+// Fetch all borrow requests (history)
+$all_schedules_query = "SELECT bs.*, b.title as book_title, b.cover_image, u.full_name as student_name, u.email as student_email
+    FROM book_schedules bs
+    JOIN books b ON bs.book_id = b.book_id
+    JOIN users u ON bs.student_id = u.student_id
+    ORDER BY bs.schedule_date DESC";
+$all_schedules_result = $conn->query($all_schedules_query);
+
+<?php
+if ($return_result && $return_result->num_rows > 0) {
+    $all_returns = [];
+    $return_result->data_seek(0); // Reset pointer
+    while ($row = $return_result->fetch_assoc()) {
+        $all_returns[] = $row;
+    }
+    echo '<pre style="color:yellow;background:black;">DEBUG RAW DATA: ' . htmlspecialchars(json_encode($all_returns, JSON_PRETTY_PRINT)) . '</pre>';
+    $return_result->data_seek(0); // Reset pointer again for the table loop
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - Library Management System</title>
+    
+    <!-- Debug information -->
+    <?php
+    $css_files = [
+        'vendor/bootstrap/css/bootstrap.min.css',
+        'assets/css/fontawesome.css',
+        'assets/css/templatemo-cyborg-gaming.css'
+    ];
+    
+    foreach ($css_files as $css_file) {
+        if (file_exists($css_file)) {
+            echo "<!-- Debug: CSS file exists: $css_file -->\n";
+        } else {
+            echo "<!-- Debug: CSS file missing: $css_file -->\n";
+        }
+    }
+    ?>
+    
+    <link href="vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/fontawesome.css">
+    <link rel="stylesheet" href="assets/css/templatemo-cyborg-gaming.css">
+    <style>
+        body { background: #1f2122; color: #fff; }
+        .admin-container { padding: 40px 0; }
+        .admin-header { font-size: 2rem; color: #2196f3; font-weight: bold; margin-bottom: 30px; }
+        .section { background: #23272b; border-radius: 10px; padding: 24px; margin-bottom: 24px; }
+        .form-control { background: #2a2d2e; border: 1px solid #3a3d3e; color: #fff; }
+        .form-control:focus { background: #2a2d2e; border-color: #2196f3; color: #fff; }
+        .btn-primary { background: #2196f3; border: none; }
+        .btn-primary:hover { background: #1976d2; }
+        .table { color: #fff; }
+        .table td, .table th { border-color: #3a3d3e; }
+        .nav-tabs { border-color: #3a3d3e; }
+        .nav-tabs .nav-link { color: #fff; }
+        .nav-tabs .nav-link.active { background: #2196f3; border-color: #2196f3; }
+        .nav-tabs .nav-link:hover { border-color: #3a3d3e; }
+        .card { background: #2a2d2e; border: none; }
+        .card-header { background: #23272b; border-bottom: 1px solid #3a3d3e; }
+        .scrollable-table { max-height: 400px; overflow-y: auto; }
+        .modal-content { background: #23272b; color: #fff; }
+        .modal-header { border-bottom: 1px solid #3a3d3e; }
+        .modal-footer { border-top: 1px solid #3a3d3e; }
+        .badge-success { background: #28a745; }
+        .badge-danger { background: #dc3545; }
+        .notification-badge {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            padding: 3px 6px;
+            border-radius: 50%;
+            background: #dc3545;
+            color: white;
+            font-size: 12px;
+        }
+        .nav-item {
+            position: relative;
+        }
+        .borrow-request {
+            background: #2a2d2e;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .borrow-request:hover {
+            background: #32373a;
+        }
+        .student-info {
+            color: #60b8eb;
+        }
+        .schedule-date {
+            color: #28a745;
+        }
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background: #2196f3;
+            color: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: none;
+        }
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .nav-buttons .btn {
+            background: #23272b;
+            border: 1px solid #3a3d3e;
+            color: #fff;
+        }
+        .nav-buttons .btn:hover,
+        .nav-buttons .btn.active {
+            background: #2196f3;
+            border-color: #2196f3;
+        }
+        .tab-content {
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .tab-content.active {
+            display: block;
+            opacity: 1;
+        }
+        /* Add these new styles */
+        .table-container {
+            background: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .table thead th {
+            background: #1a1a1a;
+            color: #fff;
+            border-bottom: 2px solid #404040;
+        }
+        .table tbody tr {
+            background: #2d2d2d;
+        }
+        .table tbody tr:nth-child(even) {
+            background: #363636;
+        }
+        .table tbody tr:hover {
+            background: #404040;
+        }
+        .table td {
+            vertical-align: middle;
+            padding: 12px 15px;
+        }
+        .badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 500;
+        }
+        .badge-warning {
+            background: #404040;
+            color: #ffd700;
+        }
+        .badge-success {
+            background: #2d2d2d;
+            color: #4CAF50;
+            border: 1px solid #4CAF50;
+        }
+        .badge-danger {
+            background: #2d2d2d;
+            color: #ff6b6b;
+            border: 1px solid #ff6b6b;
+        }
+        .overdue-notification {
+            background: #ff6b6b;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        /* Update the overdue section styles */
+        #overdue {
+            display: none;
+        }
+        
+        #overdue.active {
+            display: block;
+        }
+
+        .overdue-table {
+            width: 100%;
+            margin-top: 20px;
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+
+        .overdue-table th {
+            background: #1a1a1a;
+            color: #fff;
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #404040;
+        }
+
+        .overdue-table td {
+            padding: 12px;
+            border-bottom: 1px solid #404040;
+            vertical-align: middle;
+        }
+
+        .overdue-table tbody tr:hover {
+            background-color: #2a2d2e;
+        }
+
+        .overdue-fee {
+            color: #ff6b6b;
+            font-weight: bold;
+            background: rgba(255, 107, 107, 0.1);
+            border: 1px solid #ff6b6b;
+        }
+
+        .days-overdue {
+            color: #ffd700;
+            font-weight: bold;
+            background: rgba(255, 215, 0, 0.1);
+            border: 1px solid #ffd700;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 5px;
+        }
+
+        .btn-group .btn {
+            padding: 5px 10px;
+            font-size: 0.85rem;
+        }
+
+        .student-info {
+            line-height: 1.4;
+        }
+
+        .student-info strong {
+            color: #fff;
+        }
+
+        .student-info small {
+            color: #888;
+        }
+
+        .notification-badge {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            padding: 3px 6px;
+            border-radius: 50%;
+            background: #dc3545;
+            color: white;
+            font-size: 12px;
+        }
+        
+        .notification-item {
+            padding: 10px;
+            border-bottom: 1px solid #404040;
+            transition: background-color 0.3s;
+        }
+        
+        .notification-item:hover {
+            background-color: #2a2d2e;
+        }
+        
+        .notification-item.unread {
+            background-color: rgba(33, 150, 243, 0.1);
+        }
+        
+        .notification-item .notification-time {
+            font-size: 0.8em;
+            color: #888;
+        }
+        /* Add these new styles for status indicators */
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-dot.available {
+            background-color: #4CAF50;
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+        }
+        .status-dot.unavailable {
+            background-color: #f44336;
+            box-shadow: 0 0 8px rgba(244, 67, 54, 0.5);
+        }
+        .status-dot.enabled {
+            background-color: #4CAF50;
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+        }
+        .status-dot.disabled {
+            background-color: #f44336;
+            box-shadow: 0 0 8px rgba(244, 67, 54, 0.5);
+        }
+        .status-text {
+            font-size: 0.9em;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container admin-container">
+        <div class="admin-header">Welcome, Admin!</div>
+        
+        <!-- Simple tab navigation -->
+        <div class="nav-buttons mb-4">
+            <button class="btn btn-primary active" onclick="showTab('books')">Books</button>
+            <button class="btn btn-primary" onclick="showTab('ebooks')">eBooks</button>
+            <button class="btn btn-primary" onclick="showTab('borrow')">
+                Borrow Requests
+                <span id="borrow-notif" class="badge badge-light"></span>
+            </button>
+            <button class="btn btn-primary" onclick="showTab('returns')">
+                Return Requests
+                <span id="return-notif" class="badge badge-light"></span>
+            </button>
+            <button class="btn btn-primary" onclick="showTab('students')">Students</button>
+            <button class="btn btn-primary" onclick="showTab('overdue')">
+                Overdue Books
+                <?php if ($overdue_count > 0): ?>
+                    <span class="badge badge-danger"><?php echo $overdue_count; ?></span>
+                <?php endif; ?>
+            </button>
+            <button class="btn btn-primary" onclick="showTab('all_borrows')">
+                All Borrow Requests
+            </button>
+        </div>
+
+        <!-- Tab content -->
+        <div id="books" class="tab-content active">
+            <!-- Books content -->
+            <div class="section">
+                <h3>Add New Book</h3>
+                <form action="" method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="add_book">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Title</label>
+                                <input type="text" name="title" class="form-control" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Author</label>
+                                <input type="text" name="author" class="form-control" required>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Category</label>
+                                <input type="text" name="category" class="form-control" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Status</label>
+                                <select name="status" class="form-control" required>
+                                    <option value="Available">Available</option>
+                                    <option value="Unavailable">Unavailable</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Available Stock</label>
+                                <input type="number" name="available_stock" class="form-control" required min="0">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Cover Image</label>
+                                <input type="file" name="cover_image" class="form-control" accept="image/*" required>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Description</label>
+                        <textarea name="description" class="form-control" rows="3"></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Add Book</button>
+                </form>
+            </div>
+            <div class="section">
+                <h3>Books List</h3>
+                <div class="scrollable-table">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Cover</th>
+                                <th>Title</th>
+                                <th>Author</th>
+                                <th>Category</th>
+                                <th>Stock</th>
+                                <th>Status</th>
+                                <th>Availability</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($books_result && $books_result->num_rows > 0): ?>
+                                <?php while ($book = $books_result->fetch_assoc()): ?>
+                                    <tr data-book-id="<?php echo $book['book_id']; ?>">
+                                        <td>
+                                            <img src="assets/images/<?php echo htmlspecialchars($book['cover_image']); ?>" 
+                                                 alt="" style="width: 50px; height: 75px; object-fit: cover;">
+                                        </td>
+                                        <td><?php echo htmlspecialchars($book['title']); ?></td>
+                                        <td><?php echo htmlspecialchars($book['author']); ?></td>
+                                        <td><?php echo htmlspecialchars($book['category']); ?></td>
+                                        <td><?php echo htmlspecialchars($book['available_stock']); ?></td>
+                                        <td>
+                                            <div class="status-indicator">
+                                                <span class="status-dot <?php echo strtolower($book['status'] ?? 'Unavailable'); ?>"></span>
+                                                <span class="status-text"><?php echo htmlspecialchars($book['status'] ?? 'Unavailable'); ?></span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="status-indicator">
+                                                <?php if ($book['available_stock'] > 0): ?>
+                                                    <span class="status-dot available"></span>
+                                                    <span class="status-text">Available</span>
+                                                <?php else: ?>
+                                                    <span class="status-dot unavailable"></span>
+                                                    <span class="status-text">Not Available</span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-warning btn-sm" onclick="editBook(<?php echo htmlspecialchars(json_encode($book)); ?>)">Edit</button>
+                                            <button class="btn btn-danger btn-sm" onclick="deleteBook(<?php echo $book['book_id']; ?>)">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="8" class="text-center">No books found.</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="ebooks" class="tab-content" style="display: none;">
+            <!-- eBooks content -->
+            <div class="section">
+                <h3>Add New eBook</h3>
+                <form action="" method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="add_ebook">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Title</label>
+                                <input type="text" name="title" class="form-control" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Author</label>
+                                <input type="text" name="author" class="form-control" required>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Category</label>
+                                <input type="text" name="category" class="form-control" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Price</label>
+                                <input type="number" name="price" class="form-control" step="0.01" min="0" required>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Status</label>
+                                <select name="status" class="form-control" required>
+                                    <option value="Available">Available</option>
+                                    <option value="Unavailable">Unavailable</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Download Status</label>
+                                <select name="download_status" class="form-control" required>
+                                    <option value="Enabled">Enabled</option>
+                                    <option value="Disabled">Disabled</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Cover Image</label>
+                                <input type="file" name="cover_image" class="form-control" accept="image/*" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label>Description</label>
+                                <textarea name="description" class="form-control" rows="3"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>eBook File (PDF)</label>
+                        <input type="file" name="ebook_file" class="form-control" accept=".pdf" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Add eBook</button>
+                </form>
+            </div>
+            <div class="section">
+                <h3>eBooks List</h3>
+                <div class="scrollable-table">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Cover</th>
+                                <th>Title</th>
+                                <th>Author</th>
+                                <th>Category</th>
+                                <th>Price</th>
+                                <th>Status</th>
+                                <th>Download</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($ebooks_result && $ebooks_result->num_rows > 0): ?>
+                                <?php while ($ebook = $ebooks_result->fetch_assoc()): ?>
+                                    <tr>
+                                        <td>
+                                            <img src="assets/images/<?php echo htmlspecialchars($ebook['cover_image']); ?>" 
+                                                 alt="" style="width: 50px; height: 75px; object-fit: cover;">
+                                        </td>
+                                        <td><?php echo htmlspecialchars($ebook['title']); ?></td>
+                                        <td><?php echo htmlspecialchars($ebook['author']); ?></td>
+                                        <td><?php echo htmlspecialchars($ebook['category']); ?></td>
+                                        <td>$<?php echo number_format($ebook['price'] ?? 0, 2); ?></td>
+                                        <td>
+                                            <div class="status-indicator">
+                                                <span class="status-dot <?php echo strtolower($ebook['status'] ?? 'Unavailable'); ?>"></span>
+                                                <span class="status-text"><?php echo htmlspecialchars($ebook['status'] ?? 'Unavailable'); ?></span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="status-indicator">
+                                                <span class="status-dot <?php echo strtolower($ebook['download_status'] ?? 'Disabled'); ?>"></span>
+                                                <span class="status-text"><?php echo htmlspecialchars($ebook['download_status'] ?? 'Disabled'); ?></span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-warning btn-sm" onclick="editEbook(<?php echo htmlspecialchars(json_encode($ebook)); ?>)">Edit</button>
+                                            <button class="btn btn-danger btn-sm" onclick="deleteEbook(<?php echo $ebook['id']; ?>)">Delete</button>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="7" class="text-center">No eBooks found.</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="borrow" class="tab-content">
+            <!-- Borrow Requests content -->
+            <div class="section">
+                <h3>Pending Borrow Requests</h3>
+                <div id="borrowRequests">
+                    <?php if ($pending_schedules_result && $pending_schedules_result->num_rows > 0): ?>
+                        <?php while ($request = $pending_schedules_result->fetch_assoc()): ?>
+                            <div class="borrow-request" id="schedule-<?php echo $request['schedule_id']; ?>">
+                                <div class="row align-items-center">
+                                    <div class="col-md-2">
+                                        <img src="assets/images/<?php echo htmlspecialchars($request['cover_image']); ?>" 
+                                             alt="" style="width: 100px; height: 150px; object-fit: cover; border-radius: 5px;">
+                                    </div>
+                                    <div class="col-md-7">
+                                        <h5><?php echo htmlspecialchars($request['book_title']); ?></h5>
+                                        <p class="student-info">
+                                            Requested by: <?php echo htmlspecialchars($request['student_name']); ?><br>
+                                            Email: <?php echo htmlspecialchars($request['student_email']); ?>
+                                        </p>
+                                        <p class="schedule-date">
+                                            Schedule Date: <?php echo date('F j, Y', strtotime($request['schedule_date'])); ?><br>
+                                            Expected Return: <?php echo date('F j, Y', strtotime($request['return_date'])); ?>
+                                        </p>
+                                        <p>Purpose: <?php echo htmlspecialchars($request['purpose']); ?></p>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <form action="" method="POST" style="display: inline;">
+                                            <input type="hidden" name="action" value="approve_borrow">
+                                            <input type="hidden" name="schedule_id" value="<?php echo $request['schedule_id']; ?>">
+                                            <input type="hidden" name="book_id" value="<?php echo $request['book_id']; ?>">
+                                            <button type="submit" class="btn btn-success btn-sm">Approve</button>
+                                        </form>
+                                        <form action="" method="POST" style="display: inline;">
+                                            <input type="hidden" name="action" value="reject_borrow">
+                                            <input type="hidden" name="schedule_id" value="<?php echo $request['schedule_id']; ?>">
+                                            <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <div class="alert alert-info">
+                            No pending borrow requests at this time.
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+
+        <div id="returns" class="tab-content" style="display: none;">
+            <div class="section">
+                <h3>Return Requests</h3>
+                <div class="scrollable-table">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Book</th>
+                                <th>Student</th>
+                                <th>Borrow Date</th>
+                                <th>Due Date</th>
+                                <th>Return Date</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($return_result && $return_result->num_rows > 0): ?>
+                                <?php while ($return = $return_result->fetch_assoc()): ?>
+                                    <!-- DEBUG: <?php echo htmlspecialchars(json_encode($return)); ?> -->
+                                    <tr>
+                                        <td>
+                                            <div class="d-flex align-items-center">
+                                                <img src="assets/images/<?php echo htmlspecialchars($return['cover_image'] ?? ''); ?>" 
+                                                     alt="<?php echo htmlspecialchars($return['book_title'] ?? ''); ?>" style="width: 50px; height: 75px; object-fit: cover; margin-right: 10px;">
+                                                <?php echo htmlspecialchars($return['book_title'] ?? ''); ?>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="student-info">
+                                                <?php echo htmlspecialchars($return['student_name'] ?? ''); ?><br>
+                                                <small><?php echo htmlspecialchars($return['student_email'] ?? ''); ?></small>
+                                            </div>
+                                        </td>
+                                        <td><?php echo !empty($return['borrow_date']) ? date('Y-m-d', strtotime($return['borrow_date'])) : 'N/A'; ?></td>
+                                        <td><?php echo !empty($return['due_date']) ? date('Y-m-d', strtotime($return['due_date'])) : 'N/A'; ?></td>
+                                        <td><?php echo !empty($return['return_date']) ? date('Y-m-d', strtotime($return['return_date'])) : 'N/A'; ?></td>
+                                        <td>
+                                            <span class="badge badge-warning">Pending Approval</span>
+                                            <?php
+                                            $overdue_days = $return['days_overdue'] ?? 0;
+                                            $overdue_fee = $return['overdue_fee'] ?? 0;
+                                            if ($overdue_days > 0) {
+                                                echo '<br><span class="badge badge-danger">Overdue: ' . $overdue_days . ' days</span>';
+                                                echo '<br><span class="badge badge-danger">Fee: $' . number_format($overdue_fee, 2) . '</span>';
+                                            }
+                                            ?>
+                                        </td>
+                                        <td>
+                                            <form action="" method="POST" style="display: inline;">
+                                                <input type="hidden" name="action" value="approve_return">
+                                                <input type="hidden" name="record_id" value="<?php echo $return['record_id'] ?? ''; ?>">
+                                                <button type="submit" class="btn btn-success btn-sm">Approve</button>
+                                            </form>
+                                            <form action="" method="POST" style="display: inline;">
+                                                <input type="hidden" name="action" value="reject_return">
+                                                <input type="hidden" name="record_id" value="<?php echo $return['record_id'] ?? ''; ?>">
+                                                <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="7" class="text-center">No pending return requests.</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="students" class="tab-content" style="display: none;">
+            <div class="section">
+                <h3>Student Management</h3>
+                <div class="scrollable-table">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Student ID</th>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Total Borrows</th>
+                                <th>Active Borrows</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($students_result && $students_result->num_rows > 0): ?>
+                                <?php while ($student = $students_result->fetch_assoc()): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($student['student_id']); ?></td>
+                                        <td><?php echo htmlspecialchars($student['full_name']); ?></td>
+                                        <td><?php echo htmlspecialchars($student['email']); ?></td>
+                                        <td><?php echo $student['total_borrows']; ?></td>
+                                        <td><?php echo $student['active_borrows']; ?></td>
+                                        <td>
+                                            <?php if ($student['active_borrows'] > 0): ?>
+                                                <span class="badge badge-warning">Has Active Borrows</span>
+                                            <?php else: ?>
+                                                <span class="badge badge-success">No Active Borrows</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-info btn-sm" onclick="viewStudentDetails('<?php echo $student['student_id']; ?>')">View Details</button>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="7" class="text-center">No students found.</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="overdue" class="tab-content">
+            <div class="section">
+                <h3>Overdue Books</h3>
+                <?php if ($overdue_result && $overdue_result->num_rows > 0): ?>
+                    <div class="scrollable-table">
+                        <table class="table overdue-table">
+                            <thead>
+                                <tr>
+                                    <th>Book</th>
+                                    <th>Student</th>
+                                    <th>Borrow Date</th>
+                                    <th>Due Date</th>
+                                    <th>Days Overdue</th>
+                                    <th>Overdue Fee</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php while ($overdue = $overdue_result->fetch_assoc()): ?>
+                                    <tr>
+                                        <td>
+                                            <div class="d-flex align-items-center">
+                                                <?php if (!empty($overdue['cover_image'])): ?>
+                                                    <img src="assets/images/<?php echo htmlspecialchars($overdue['cover_image']); ?>" 
+                                                         alt="<?php echo htmlspecialchars($overdue['book_title']); ?>"
+                                                         style="width: 50px; height: 75px; object-fit: cover; margin-right: 10px;">
+                                                <?php else: ?>
+                                                    <div style="width: 50px; height: 75px; background: #404040; margin-right: 10px; display: flex; align-items: center; justify-content: center;">
+                                                        <i class="fa fa-book" style="color: #666;"></i>
+                                                    </div>
+                                                <?php endif; ?>
+                                                <span><?php echo htmlspecialchars($overdue['book_title']); ?></span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="student-info">
+                                                <strong><?php echo htmlspecialchars($overdue['student_name']); ?></strong><br>
+                                                <small class="text-muted"><?php echo htmlspecialchars($overdue['student_email']); ?></small>
+                                            </div>
+                                        </td>
+                                        <td><?php echo date('Y-m-d', strtotime($overdue['borrow_date'])); ?></td>
+                                        <td><?php echo date('Y-m-d', strtotime($overdue['due_date'])); ?></td>
+                                        <td>
+                                            <span class="badge badge-danger days-overdue">
+                                                <?php echo $overdue['days_overdue']; ?> days
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <span class="badge badge-danger overdue-fee">
+                                                $<?php echo number_format($overdue['overdue_fee'], 2); ?>
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <div class="btn-group">
+                                                <button class="btn btn-warning btn-sm" onclick="sendOverdueNotification(<?php echo $overdue['record_id']; ?>)">
+                                                    <i class="fa fa-bell"></i> Remind
+                                                </button>
+                                                <button class="btn btn-success btn-sm" onclick="extendDueDate(<?php echo $overdue['record_id']; ?>)">
+                                                    <i class="fa fa-calendar-plus"></i> Extend
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php else: ?>
+                    <div class="alert alert-info">
+                        No overdue books at this time.
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <div id="all_borrows" class="tab-content" style="display: none;">
+            <div class="section">
+                <h3>All Borrow Requests (History)</h3>
+                <div class="scrollable-table">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Book</th>
+                                <th>Student</th>
+                                <th>Schedule Date</th>
+                                <th>Return Date</th>
+                                <th>Purpose</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($all_schedules_result && $all_schedules_result->num_rows > 0): ?>
+                                <?php while ($row = $all_schedules_result->fetch_assoc()): ?>
+                                    <tr>
+                                        <td>
+                                            <div class="d-flex align-items-center">
+                                                <img src="assets/images/<?php echo htmlspecialchars($row['cover_image']); ?>" 
+                                                     alt="" style="width: 40px; height: 60px; object-fit: cover; margin-right: 10px;">
+                                                <?php echo htmlspecialchars($row['book_title']); ?>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="student-info">
+                                                <?php echo htmlspecialchars($row['student_name']); ?><br>
+                                                <small><?php echo htmlspecialchars($row['student_email']); ?></small>
+                                            </div>
+                                        </td>
+                                        <td><?php echo date('Y-m-d', strtotime($row['schedule_date'])); ?></td>
+                                        <td><?php echo date('Y-m-d', strtotime($row['return_date'])); ?></td>
+                                        <td><?php echo htmlspecialchars($row['purpose']); ?></td>
+                                        <td>
+                                            <?php
+                                                $status = strtolower($row['status']);
+                                                $badgeClass = 'badge-secondary';
+                                                if ($status === 'pending') $badgeClass = 'badge-warning';
+                                                elseif ($status === 'confirmed') $badgeClass = 'badge-success';
+                                                elseif ($status === 'cancelled') $badgeClass = 'badge-danger';
+                                            ?>
+                                            <span class="badge <?php echo $badgeClass; ?>"><?php echo ucfirst($status); ?></span>
+                                        </td>
+                                    </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr><td colspan="6" class="text-center">No borrow requests found.</td></tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Book Modal -->
+    <div class="modal fade" id="editBookModal" tabindex="-1" role="dialog" aria-labelledby="editBookModalLabel" aria-hidden="true">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editBookModalLabel">Edit Book</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <form id="editBookForm" action="" method="POST" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <input type="hidden" name="action" value="edit_book">
+                        <input type="hidden" name="book_id" id="edit_book_id">
+                        <input type="hidden" name="current_cover" id="edit_current_cover">
+                        <div class="form-group">
+                            <label>Title</label>
+                            <input type="text" name="title" id="edit_book_title" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Author</label>
+                            <input type="text" name="author" id="edit_book_author" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Category</label>
+                            <input type="text" name="category" id="edit_book_category" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Status</label>
+                            <select name="status" id="edit_book_status" class="form-control" required>
+                                <option value="Available">Available</option>
+                                <option value="Unavailable">Unavailable</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Available Stock</label>
+                            <input type="number" name="available_stock" id="edit_book_stock" class="form-control" required min="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea name="description" id="edit_book_description" class="form-control" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Cover Image (leave empty to keep current)</label>
+                            <input type="file" name="cover_image" class="form-control" accept="image/*">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit eBook Modal -->
+    <div class="modal fade" id="editEbookModal" tabindex="-1" role="dialog" aria-labelledby="editEbookModalLabel" aria-hidden="true">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editEbookModalLabel">Edit eBook</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <form id="editEbookForm" action="" method="POST" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <input type="hidden" name="action" value="edit_ebook">
+                        <input type="hidden" name="ebook_id" id="edit_ebook_id">
+                        <input type="hidden" name="current_cover" id="edit_ebook_current_cover">
+                        <input type="hidden" name="current_file" id="edit_ebook_current_file">
+                        <div class="form-group">
+                            <label>Title</label>
+                            <input type="text" name="title" id="edit_ebook_title" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Author</label>
+                            <input type="text" name="author" id="edit_ebook_author" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Category</label>
+                            <input type="text" name="category" id="edit_ebook_category" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Price</label>
+                            <input type="number" name="price" id="edit_ebook_price" class="form-control" step="0.01" min="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Status</label>
+                            <select name="status" id="edit_ebook_status" class="form-control" required>
+                                <option value="Available">Available</option>
+                                <option value="Unavailable">Unavailable</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Download Status</label>
+                            <select name="download_status" id="edit_ebook_download_status" class="form-control" required>
+                                <option value="Enabled">Enabled</option>
+                                <option value="Disabled">Disabled</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea name="description" id="edit_ebook_description" class="form-control" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Cover Image (leave empty to keep current)</label>
+                            <input type="file" name="cover_image" class="form-control" accept="image/*">
+                        </div>
+                        <div class="form-group">
+                            <label>eBook File (leave empty to keep current)</label>
+                            <input type="file" name="ebook_file" class="form-control" accept=".pdf">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Student Details Modal -->
+    <div class="modal fade" id="studentDetailsModal" tabindex="-1" role="dialog" aria-labelledby="studentDetailsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="studentDetailsModalLabel">Student Details</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="student-info mb-4">
+                        <h4 id="studentName"></h4>
+                        <p>Student ID: <span id="studentId"></span></p>
+                        <p>Email: <span id="studentEmail"></span></p>
+                    </div>
+                    <div class="borrowed-books">
+                        <h5>Borrowed Books</h5>
+                        <div class="table-responsive">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Book Title</th>
+                                        <th>Borrow Date</th>
+                                        <th>Due Date</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="borrowedBooksList">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="notification" class="notification"></div>
+
+    <!-- Make sure jQuery is loaded first -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <!-- Then Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        // Update the showTab function
+        function showTab(tabId, event) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.style.display = 'none';
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all buttons
+            document.querySelectorAll('.nav-buttons .btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab
+            const selectedTab = document.getElementById(tabId);
+            if (selectedTab) {
+                selectedTab.style.display = 'block';
+                // Add a small delay before adding the active class for the transition
+                setTimeout(() => {
+                    selectedTab.classList.add('active');
+                }, 10);
+            }
+            
+            // Add active class to clicked button if event is provided
+            if (event && event.target) {
+                event.target.classList.add('active');
+            }
+
+            // Debug log
+            console.log('Switching to tab:', tabId);
+            console.log('Selected tab element:', selectedTab);
+        }
+
+        // Initialize when document is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            // Show books tab by default
+            showTab('books');
+            
+            // Add click handlers for tab buttons
+            document.querySelectorAll('.nav-buttons .btn').forEach(button => {
+                button.addEventListener('click', function(event) {
+                    const buttonText = this.textContent.toLowerCase().replace(/\s+/g, '');
+                    let tabId = buttonText;
+                    
+                    // Special case for borrow requests and overdue
+                    if (buttonText.includes('borrow')) {
+                        tabId = 'borrow';
+                    } else if (buttonText.includes('overdue')) {
+                        tabId = 'overdue';
+                    }
+                    
+                    showTab(tabId, event);
+                });
+            });
+        });
+
+        window.viewStudentDetails = function(studentId) {
+            console.log('Viewing details for student:', studentId);
+            
+            // Fetch student details and borrowed books
+            $.ajax({
+                url: 'get_student_details.php',
+                method: 'GET',
+                data: { student_id: studentId },
+                success: function(response) {
+                    console.log('Response:', response);
+                    try {
+                        const data = JSON.parse(response);
+                        if (data.success) {
+                            // Update student info
+                            $('#studentName').text(data.student.full_name);
+                            $('#studentId').text(data.student.student_id);
+                            $('#studentEmail').text(data.student.email);
+                            
+                            // Update borrowed books list
+                            let booksHtml = '';
+                            if (data.borrowed_books && data.borrowed_books.length > 0) {
+                                data.borrowed_books.forEach(book => {
+                                    const isOverdue = book.status === 'overdue';
+                                    
+                                    booksHtml += `
+                                        <tr>
+                                            <td>${book.title}</td>
+                                            <td>${book.borrow_date}</td>
+                                            <td>
+                                                ${book.due_date}
+                                                ${isOverdue ? '<span class="badge badge-danger ml-2">Overdue</span>' : ''}
+                                            </td>
+                                            <td>
+                                                <span class="badge badge-${getStatusBadgeClass(book.status)}">
+                                                    ${book.status}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                ${book.status === 'confirmed' || book.status === 'overdue' ? 
+                                                    `<button class="btn btn-warning btn-sm" onclick="returnBook(${book.schedule_id})">
+                                                        Return Book
+                                                    </button>` : 
+                                                    ''}
+                                            </td>
+                                        </tr>
+                                    `;
+                                });
+                            } else {
+                                booksHtml = '<tr><td colspan="5" class="text-center">No books borrowed</td></tr>';
+                            }
+                            $('#borrowedBooksList').html(booksHtml);
+                            
+                            // Show the modal
+                            $('#studentDetailsModal').modal('show');
+                        } else {
+                            showNotification('Error: ' + data.message, 'error');
+                        }
+                    } catch (e) {
+                        console.error('Error parsing response:', e);
+                        console.error('Raw response:', response);
+                        showNotification('Error processing response', 'error');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('Ajax error:', error);
+                    console.error('Status:', status);
+                    console.error('Response:', xhr.responseText);
+                    showNotification('Error fetching student details', 'error');
+                }
+            });
+        };
+
+        window.returnBook = function(scheduleId) {
+            if (confirm('Are you sure you want to mark this book as returned?')) {
+                $.ajax({
+                    url: 'handle_request.php',
+                    method: 'POST',
+                    data: {
+                        action: 'return_book',
+                        schedule_id: scheduleId
+                    },
+                    success: function(response) {
+                        try {
+                            const data = JSON.parse(response);
+                            if (data.success) {
+                                showNotification('Book marked as returned successfully');
+                                // Refresh the student details
+                                viewStudentDetails($('#studentId').text());
+                            } else {
+                                showNotification('Error: ' + data.message, 'error');
+                            }
+                        } catch (e) {
+                            showNotification('Error processing response', 'error');
+                        }
+                    },
+                    error: function() {
+                        showNotification('Error processing return request', 'error');
+                    }
+                });
+            }
+        };
+
+        window.getStatusBadgeClass = function(status) {
+            switch(status) {
+                case 'confirmed':
+                    return 'success';
+                case 'pending':
+                    return 'warning';
+                case 'cancelled':
+                    return 'danger';
+                case 'returned':
+                    return 'info';
+                case 'overdue':
+                    return 'danger';
+                default:
+                    return 'secondary';
+            }
+        };
+
+        window.showNotification = function(message, type = 'success') {
+            const notification = $('#notification');
+            notification.text(message);
+            notification.removeClass('bg-success bg-danger').addClass(type === 'success' ? 'bg-success' : 'bg-danger');
+            notification.fadeIn();
+            setTimeout(() => {
+                notification.fadeOut();
+            }, 3000);
+        };
+
+        // Add this new function for handling borrow requests
+        window.handleBorrowRequest = function(recordId, action) {
+            if (confirm('Are you sure you want to ' + (action === 'approve_borrow' ? 'approve' : 'reject') + ' this request?')) {
+                $.ajax({
+                    url: 'handle_request.php',
+                    method: 'POST',
+                    data: {
+                        action: action,
+                        record_id: recordId
+                    },
+                    success: function(response) {
+                        try {
+                            const data = JSON.parse(response);
+                            if (data.success) {
+                                $(`#request-${recordId}`).fadeOut();
+                                showNotification(data.message);
+                                // Update pending count if available
+                                if (data.pending_count !== undefined) {
+                                    const badge = $('.nav-buttons .btn:contains("Borrow Requests") .badge');
+                                    if (data.pending_count > 0) {
+                                        badge.text(data.pending_count);
+                                    } else {
+                                        badge.remove();
+                                    }
+                                }
+                            } else {
+                                showNotification('Error: ' + data.message, 'error');
+                            }
+                        } catch (e) {
+                            showNotification('Error processing response', 'error');
+                        }
+                    },
+                    error: function() {
+                        showNotification('Error processing request', 'error');
+                    }
+                });
+            }
+        };
+
+        function sendOverdueNotification(recordId) {
+            if (confirm('Send overdue reminder to the student?')) {
+                $.ajax({
+                    url: 'handle_request.php',
+                    method: 'POST',
+                    data: {
+                        action: 'send_overdue_notification',
+                        record_id: recordId
+                    },
+                    success: function(response) {
+                        try {
+                            const data = JSON.parse(response);
+                            if (data.success) {
+                                showNotification('Overdue reminder sent successfully');
+                            } else {
+                                showNotification('Error: ' + data.message, 'error');
+                            }
+                        } catch (e) {
+                            showNotification('Error processing request', 'error');
+                        }
+                    },
+                    error: function() {
+                        showNotification('Error sending reminder', 'error');
+                    }
+                });
+            }
+        }
+
+        function extendDueDate(recordId) {
+            const newDate = prompt('Enter new due date (YYYY-MM-DD):');
+            if (newDate) {
+                $.ajax({
+                    url: 'handle_request.php',
+                    method: 'POST',
+                    data: {
+                        action: 'extend_due_date',
+                        record_id: recordId,
+                        new_date: newDate
+                    },
+                    success: function(response) {
+                        try {
+                            const data = JSON.parse(response);
+                            if (data.success) {
+                                showNotification('Due date extended successfully');
+                                location.reload();
+                            } else {
+                                showNotification('Error: ' + data.message, 'error');
+                            }
+                        } catch (e) {
+                            showNotification('Error processing request', 'error');
+                        }
+                    },
+                    error: function() {
+                        showNotification('Error extending due date', 'error');
+                    }
+                });
+            }
+        }
+
+        // Function to edit book
+        function editBook(book) {
+            // Populate the edit form
+            $('#edit_book_id').val(book.book_id);
+            $('#edit_book_title').val(book.title);
+            $('#edit_book_author').val(book.author);
+            $('#edit_book_category').val(book.category);
+            $('#edit_book_status').val(book.status);
+            $('#edit_book_stock').val(book.available_stock);
+            $('#edit_book_description').val(book.description);
+            $('#edit_current_cover').val(book.cover_image);
+            
+            // Show the edit modal
+            $('#editBookModal').modal('show');
+        }
+
+        // Handle edit form submission
+        $('#editBookForm').submit(function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            
+            $.ajax({
+                url: 'admin_page.php',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                success: function(response) {
+                    try {
+                        const result = JSON.parse(response);
+                        if (result.success) {
+                            showNotification(result.message, 'success');
+                            $('#editBookModal').modal('hide');
+                            
+                            // Update the book row in the table
+                            const bookId = formData.get('book_id');
+                            const row = $(`tr[data-book-id="${bookId}"]`);
+                            
+                            // Update the row data
+                            row.find('td:nth-child(2)').text(formData.get('title'));
+                            row.find('td:nth-child(3)').text(formData.get('author'));
+                            row.find('td:nth-child(4)').text(formData.get('category'));
+                            row.find('td:nth-child(5)').text(formData.get('available_stock'));
+                            
+                            // Update status indicator
+                            const statusDot = row.find('.status-dot');
+                            const statusText = row.find('.status-text');
+                            statusDot.removeClass('available unavailable').addClass(formData.get('status').toLowerCase());
+                            statusText.text(formData.get('status'));
+                            
+                            // Update cover image if changed
+                            if (formData.get('cover_image') && formData.get('cover_image') !== formData.get('current_cover')) {
+                                const coverImg = row.find('td:first-child img');
+                                coverImg.attr('src', 'assets/images/' + formData.get('cover_image'));
+                            }
+                            
+                            // Show success message
+                            showNotification('Book updated successfully', 'success');
+                        } else {
+                            showNotification(result.message || 'Error updating book', 'error');
+                        }
+                    } catch (e) {
+                        console.error('Error parsing response:', e);
+                        console.error('Raw response:', response);
+                        showNotification('Error updating book: Invalid server response', 'error');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('Ajax error:', error);
+                    console.error('Status:', status);
+                    console.error('Response:', xhr.responseText);
+                    showNotification('Error updating book: ' + error, 'error');
+                }
+            });
+        });
+
+        // Add or update the editEbook JS function
+        function editEbook(ebook) {
+            // Populate the edit form fields with the correct eBook data
+            $('#edit_ebook_id').val(ebook.id); // Use 'id' as the primary key
+            $('#edit_ebook_title').val(ebook.title);
+            $('#edit_ebook_author').val(ebook.author);
+            $('#edit_ebook_category').val(ebook.category);
+            $('#edit_ebook_price').val(ebook.price ?? 0);
+            $('#edit_ebook_status').val(ebook.status ?? 'Unavailable');
+            $('#edit_ebook_download_status').val(ebook.download_status ?? 'Disabled');
+            $('#edit_ebook_description').val(ebook.description);
+            $('#edit_ebook_current_cover').val(ebook.cover_image);
+            $('#edit_ebook_current_file').val(ebook.file_path);
+            // Show the edit modal
+            $('#editEbookModal').modal('show');
+        }
+
+        // Handle edit eBook form submission
+        $('#editEbookForm').submit(function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            $.ajax({
+                url: 'admin_page.php',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                success: function(response) {
+                    try {
+                        const result = JSON.parse(response);
+                        if (result.success) {
+                            showNotification(result.message || 'Ebook updated successfully', 'success');
+                            $('#editEbookModal').modal('hide');
+                            // Optionally, refresh the eBook list or update the row
+                        } else {
+                            showNotification(result.message || 'Error updating ebook', 'error');
+                        }
+                    } catch (e) {
+                        showNotification('Error updating ebook: Invalid server response', 'error');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    showNotification('Error updating ebook: ' + error, 'error');
+                }
+            });
+        });
+
+        function checkBorrowNotifications() {
+            fetch('check_borrow_notifications.php')
+                .then(response => response.json())
+                .then(data => {
+                    const notifElem = document.getElementById('borrow-notif');
+                    if (notifElem) {
+                        notifElem.textContent = data.pending_count > 0 ? data.pending_count : '';
+                    }
+                });
+        }
+        setInterval(checkBorrowNotifications, 5000);
+        window.onload = checkBorrowNotifications;
+
+        function checkAdminNotifications() {
+            fetch('check_admin_notifications.php')
+                .then(response => response.json())
+                .then(data => {
+                    // Borrow requests badge
+                    const borrowNotif = document.getElementById('borrow-notif');
+                    if (borrowNotif) {
+                        borrowNotif.textContent = data.pending_borrow > 0 ? data.pending_borrow : '';
+                    }
+                    // Return requests badge
+                    const returnNotif = document.getElementById('return-notif');
+                    if (returnNotif) {
+                        returnNotif.textContent = data.pending_return > 0 ? data.pending_return : '';
+                    }
+                });
+        }
+        setInterval(checkAdminNotifications, 5000);
+        window.onload = checkAdminNotifications;
+
+        function updatePendingRequests() {
+            $.ajax({
+                url: 'admin_page.php',
+                type: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                success: function(response) {
+                    if (response.pending_count > 0) {
+                        $('#pendingRequestsBadge').text(response.pending_count).show();
+                    } else {
+                        $('#pendingRequestsBadge').hide();
+                    }
+                    
+                    var requestsHtml = '';
+                    response.pending_requests.forEach(function(request) {
+                        requestsHtml += `
+                            <div class="col-12 mb-3">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">${request.book_title}</h5>
+                                        <p class="card-text">
+                                            <strong>Student:</strong> ${request.student_name} (${request.student_email})<br>
+                                            <strong>Schedule Date:</strong> ${request.schedule_date}<br>
+                                            <strong>Purpose:</strong> ${request.purpose}
+                                        </p>
+                                        <div class="btn-group">
+                                            <button class="btn btn-success" onclick="approveBorrow(${request.schedule_id})">
+                                                <i class="fas fa-check"></i> Approve
+                                            </button>
+                                            <button class="btn btn-danger" onclick="rejectBorrow(${request.schedule_id})">
+                                                <i class="fas fa-times"></i> Reject
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    $('#pendingRequestsContainer').html(requestsHtml);
+                }
+            });
+        }
+
+        function approveBorrow(scheduleId) {
+            $.ajax({
+                url: 'admin_page.php',
+                type: 'POST',
+                data: {
+                    action: 'approve_borrow',
+                    schedule_id: scheduleId
+                },
+                success: function(response) {
+                    updatePendingRequests();
+                }
+            });
+        }
+
+        function rejectBorrow(scheduleId) {
+            $.ajax({
+                url: 'admin_page.php',
+                type: 'POST',
+                data: {
+                    action: 'reject_borrow',
+                    schedule_id: scheduleId
+                },
+                success: function(response) {
+                    updatePendingRequests();
+                }
+            });
+        }
+
+        // Update pending requests every 5 seconds
+        setInterval(updatePendingRequests, 5000);
+    </script>
+
+    <!-- Add this in the body section -->
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <h2>Pending Borrow Requests <span id="pendingRequestsBadge" class="badge bg-danger"></span></h2>
+                <div id="pendingRequestsContainer" class="row">
+                    <!-- Pending requests will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html> 
